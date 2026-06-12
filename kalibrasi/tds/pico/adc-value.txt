@@ -1,24 +1,25 @@
-| Sampel        | TDS Tester (ppm) | Tegangan Rata-rata (V) |
-| ------------- | ---------------- | ---------------------- |
-| Amidis        | 1                | 0.607                  |
-| Super O2      | 2                | 0.647                  |
-| Cleo          | 14               | 0.612                  |
-| Refresh E+    | 18               | 0.652                  |
-| Clairine 8+   | 56               | 0.658                  |
-| Indomaret     | 58               | 0.672                  |
-| Club          | 73               | 0.634                  |
-| Vola          | 77               | 0.656                  |
-| Nestle        | 77               | 0.648                  |
-| Alfamart      | 80               | 0.636                  |
-| Oasis         | 84               | 0.635                  |
-| Crystalline   | 93               | 0.643                  |
-| Pristine      | 109              | 0.639                  |
-| Aquaviva      | 109              | 0.649                  |
-| Aqua          | 120              | 0.611                  |
-| Air Dispenser | 143              | 0.689                  |
-| Le Minerale   | 155              | 0.639                  |
-| Vit           | 160              | 0.659                  |
-| Mountop       | 165              | 0.687                  |
-| Prima         | 179              | 0.669                  |
-| Sanqua        | 180              | 0.680                  |
-| Air Rebus     | 194              | 0.726                  |
+| Sampel               | TDS Tester (ppm) | Tegangan Rata-rata (V) |
+| -------------------- | ---------------- | ---------------------- |
+| Udara (probe kering) | 0                | 0.726                  |
+| Amidis               | 1                | 0.607                  |
+| Super O2             | 2                | 0.647                  |
+| Cleo                 | 14               | 0.612                  |
+| Refresh E+           | 18               | 0.652                  |
+| Clairine 8+          | 56               | 0.658                  |
+| Indomaret            | 58               | 0.672                  |
+| Club                 | 73               | 0.634                  |
+| Vola                 | 77               | 0.656                  |
+| Nestle               | 77               | 0.648                  |
+| Alfamart             | 80               | 0.636                  |
+| Oasis                | 84               | 0.635                  |
+| Crystalline          | 93               | 0.643                  |
+| Pristine             | 109              | 0.639                  |
+| Aquaviva             | 109              | 0.649                  |
+| Aqua                 | 120              | 0.611                  |
+| Air Dispenser        | 143              | 0.689                  |
+| Le Minerale          | 155              | 0.639                  |
+| Vit                  | 160              | 0.659                  |
+| Mountop              | 165              | 0.687                  |
+| Prima                | 179              | 0.669                  |
+| Sanqua               | 180              | 0.680                  |
+| Air Rebus            | 194              | 0.726                  |
