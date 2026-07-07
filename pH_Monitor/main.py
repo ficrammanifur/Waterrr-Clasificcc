@@ -32,7 +32,7 @@ EMA_ALPHA = 0.20
 
 # Calibration points (voltage, pH)
 CAL_POINTS = [
-    (3.29406, 4.01),
+    (3.2487, 4.01),
     (2.94870, 6.86),
     (2.52498, 9.18)
 ]
