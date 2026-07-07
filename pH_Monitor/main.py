@@ -34,7 +34,7 @@ EMA_ALPHA = 0.20
 CAL_POINTS = [
     (3.29406, 4.01),
     (2.94870, 6.86),
-    (2.62498, 9.18)
+    (2.52498, 9.18)
 ]
 CAL_POINTS.sort(key=lambda x: x[0])
 
