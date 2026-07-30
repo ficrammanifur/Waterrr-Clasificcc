@@ -1,91 +1,73 @@
 from machine import ADC
-from time import sleep_ms
+import time
 
-# ==========================================
-# Raspberry Pi Pico 2
-# pH Meter
-# 3 Point Calibration
-# ==========================================
+# =====================================
+# Raspberry Pi Pico pH Sensor
+# GPIO26 (ADC0)
+# Moving Average + EMA
+# =====================================
 
 ph_sensor = ADC(26)
 
-# ==========================================
-# HASIL KALIBRASI
-# ==========================================
-
-V4  = 3.29406
-PH4 = 4.01
-
-V7  = 2.94870
-PH7 = 6.86
-
-V9  = 2.62498
-PH9 = 9.18
-
-# ==========================================
-# FILTER
-# ==========================================
-
+# ================================
+# Moving Average
+# ================================
 SCOUNT = 20
-
-buffer = [0] * SCOUNT
-index = 0
-
-ph_filtered = None
-
-
-# ==========================================
-# Fungsi Interpolasi
-# ==========================================
-
-def get_ph(voltage):
-
-    # pH 4.01 -> 6.86
-    if voltage >= V7:
-
-        ph = PH4 + (PH7 - PH4) * (V4 - voltage) / (V4 - V7)
-
-    # pH 6.86 -> 9.18
-    else:
-
-        ph = PH7 + (PH9 - PH7) * (V7 - voltage) / (V7 - V9)
-
-    return ph
-
-
-# ==========================================
-# Warm Up
-# ==========================================
+analog_buffer = []
 
 for i in range(SCOUNT):
-    buffer[i] = ph_sensor.read_u16()
-    sleep_ms(20)
+    analog_buffer.append(ph_sensor.read_u16())
+    time.sleep(0.02)
 
-print("=" * 50)
-print("      Raspberry Pi Pico 2 pH Meter")
-print("        3 Point Calibration")
-print("=" * 50)
+analog_index = 0
+
+# ================================
+# Kalibrasi 3 Titik
+# ================================
+V4  = 3.290
+PH4 = 4.00
+
+V7  = 2.870
+PH7 = 6.86
+
+V9  = 2.522
+PH9 = 9.18
+
+# EMA
+ph_filtered = 7.0
+
+
+def get_ph(voltage):
+    if voltage >= V7:
+        # Interpolasi 4 -> 6.86
+        return PH4 + (PH7 - PH4) * (V4 - voltage) / (V4 - V7)
+    else:
+        # Interpolasi 6.86 -> 9.18
+        return PH7 + (PH9 - PH7) * (V7 - voltage) / (V7 - V9)
+
+
+print("====================================")
+print("PICO pH SENSOR READY")
+print("3-POINT INTERPOLATION ACTIVE")
+print("====================================")
 
 while True:
 
-    buffer[index] = ph_sensor.read_u16()
+    # Baca ADC
+    analog_buffer[analog_index] = ph_sensor.read_u16()
+    analog_index = (analog_index + 1) % SCOUNT
 
-    index += 1
+    # Moving Average
+    avg_adc = sum(analog_buffer) / SCOUNT
 
-    if index >= SCOUNT:
-        index = 0
+    # Konversi ke Tegangan
+    voltage = avg_adc * (3.3 / 65535.0)
 
-    avg_adc = sum(buffer) / SCOUNT
-
-    voltage = avg_adc * 3.3 / 65535.0
-
+    # Hitung pH
     ph_raw = get_ph(voltage)
 
-    # EMA
-    if ph_filtered is None:
-        ph_filtered = ph_raw
-    else:
-        ph_filtered = (0.85 * ph_filtered) + (0.15 * ph_raw)
+    # EMA Filter
+    ph_filtered = (0.85 * ph_filtered) + (0.15 * ph_raw)
 
     # Clamp
     if ph_filtered < 0:
@@ -95,12 +77,8 @@ while True:
         ph_filtered = 14
 
     print(
-        "ADC:{:6.0f} | Voltage:{:.3f}V | pH Raw:{:.2f} | pH:{:.2f}".format(
-            avg_adc,
-            voltage,
-            ph_raw,
-            ph_filtered
-        )
+        "ADC: {:.0f} | Voltage: {:.3f} V | pH Raw: {:.2f} | pH Smooth: {:.2f}"
+        .format(avg_adc, voltage, ph_raw, ph_filtered)
     )
 
-    sleep_ms(1000)
+    time.sleep(1)
