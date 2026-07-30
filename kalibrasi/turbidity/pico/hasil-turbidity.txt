@@ -1,0 +1,23 @@
+# ============================================================
+# 📊 TURBIDITY - KALIBRASI DARI DATA REAL ANDA
+# ============================================================
+
+# Dari data Anda:
+# - Udara: ADC ~1660 (25 NTU) 
+# - Air Jernih: ADC ~2048 (5 NTU)
+# - Sangat Keruh: ADC ~80 (100 NTU)
+
+TURB_JERNIH = 2048   # Nilai ADC di air jernih (dari data Anda)
+TURB_KERUH = 80      # Nilai ADC di air sangat keruh (dari data Anda)
+TURB_RANGE = TURB_JERNIH - TURB_KERUH  # 2048 - 80 = 1968
+
+def adc_to_ntu(adc):
+    """Konversi ADC ke NTU dengan kalibrasi real"""
+    if adc >= TURB_JERNIH:
+        return 0.0
+    elif adc <= TURB_KERUH:
+        return 100.0
+    else:
+        # Linear mapping: ADC rendah = NTU tinggi
+        ntu = (TURB_JERNIH - adc) * 100.0 / TURB_RANGE
+        return max(0, min(100, ntu))
