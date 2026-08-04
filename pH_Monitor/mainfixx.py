@@ -1,581 +1,272 @@
 """
-Water Quality Monitor with Classification
+Water Quality Monitor - ML Edition
 Raspberry Pi Pico 2 (RP2350)
-Simple OLED Display
+Single Read - Tampilan Final
 """
 
-import machine
 import time
-import sys
-import onewire
-import ds18x20
+import math
+from machine import Pin, ADC, I2C
+from ssd1306 import SSD1306
 
-# Hardware configuration
-I2C_ID = 1
-SDA_PIN = 6
-SCL_PIN = 7
-OLED_ADDR = 0x3C
-OLED_WIDTH = 128
-OLED_HEIGHT = 64
+# ============================================================
+# KONFIGURASI HARDWARE
+# ============================================================
 
-# Sensor pins
-ADC_PH_PIN = 26
-ADC_TDS_PIN = 27
-ADC_TURBIDITY_PIN = 28
-DS18B20_PIN = 16
+i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
+oled = SSD1306(128, 64, i2c)
 
-# ADC configuration
-ADC_REF = 3.3
-ADC_MAX = 65535
+adc_ph = ADC(Pin(26))
+adc_tds = ADC(Pin(27))
+adc_turb = ADC(Pin(28))
 
-# Filter configuration
-SAMPLING_INTERVAL_MS = 100
-OLED_UPDATE_INTERVAL_MS = 1000  # Update setiap 1 detik
-SERIAL_INTERVAL_MS = 2000
+led = Pin(25, Pin.OUT)
 
-# Filter untuk pH
-MEDIAN_FILTER_SIZE = 10
-MOVING_AVERAGE_SIZE = 20
-EMA_ALPHA = 0.20
+# ============================================================
+# 📊 KALIBRASI pH - 3 POINT
+# ============================================================
 
-# Calibration points pH (voltage, pH)
-CAL_POINTS = [
-    (3.2487, 4.01),
-    (2.94870, 6.86),
-    (2.52498, 9.18)
-]
-CAL_POINTS.sort(key=lambda x: x[0])
+V4, PH4 = 3.290, 4.00
+V7, PH7 = 2.870, 6.86
+V9, PH9 = 2.522, 9.18
 
-# TDS Calibration
-TDS_CAL_FACTOR = 2.8
-TDS_TEMP_COEFF = 0.02
+def get_ph(voltage):
+    if voltage >= V7:
+        return PH4 + (PH7 - PH4) * (V4 - voltage) / (V4 - V7)
+    else:
+        return PH7 + (PH9 - PH7) * (V7 - voltage) / (V7 - V9)
 
-# Turbidity Calibration
-TURB_JERNIH = 2150
-TURB_KERUH = 200
+# ============================================================
+# 📊 KALIBRASI TDS
+# ============================================================
+
+TDS_A1 = -84457.6393026635
+TDS_A2 = 129089.75684172624
+TDS_A3 = -64637.674455130655
+TDS_B = 18201.754358930462
+
+def voltage_to_tds(voltage):
+    tds = (TDS_A1 * voltage +
+           TDS_A2 * (voltage ** 2) +
+           TDS_A3 * (voltage ** 3) +
+           TDS_B)
+    return max(0, tds)
+
+# ============================================================
+# 📊 KALIBRASI TURBIDITY
+# ============================================================
+
+TURB_JERNIH = 2048
+TURB_KERUH = 80
 TURB_RANGE = TURB_JERNIH - TURB_KERUH
 
-# ============================================
-# WATER CLASSIFIER
-# ============================================
+def adc_to_ntu(adc):
+    if adc >= TURB_JERNIH:
+        return 0.0
+    elif adc <= TURB_KERUH:
+        return 100.0
+    else:
+        return max(0, min(100, (TURB_JERNIH - adc) * 100.0 / TURB_RANGE))
 
-class WaterClassifier:
-    @staticmethod
-    def classify(pH, tds, turb, temp):
-        """Klasifikasi air berdasarkan parameter"""
-        
-        # Hitung skor kelayakan (0-100)
-        score = 100.0
-        
-        # Penalti pH
-        if pH < 6.5:
-            score -= 30
-        elif pH > 9.5:
-            score -= 30
-        elif pH < 7.0 or pH > 8.5:
-            score -= 10
-        
-        # Penalti TDS
-        if tds > 500:
-            score -= 40
-        elif tds > 300:
-            score -= 25
-        elif tds > 200:
-            score -= 10
-        
-        # Penalti Turbidity
-        if turb > 20:
-            score -= 30
-        elif turb > 10:
-            score -= 20
-        elif turb > 5:
-            score -= 10
-        
-        # Penalti Suhu
-        if temp > 35 or temp < 10:
-            score -= 20
-        elif temp > 30:
-            score -= 5
-        
-        # Batasi score
-        score = max(0, min(100, score))
-        
-        # Status
-        if score >= 70:
-            status = "LAYAK"
-            kategori = "AMAN"
-        elif score >= 50:
-            status = "TIDAK LAYAK"
-            kategori = "PERLU OLAH"
-        else:
-            status = "TIDAK LAYAK"
-            kategori = "BAHAYA"
-        
-        return score, status, kategori
+def ntu_to_persen_jernih(ntu):
+    return max(0, min(100, 100 - ntu))
 
-class WaterQualityMonitor:
-    def __init__(self):
-        print("\nInitializing Water Quality Monitor...")
-        
-        # Initialize I2C
-        try:
-            self.i2c = machine.I2C(I2C_ID, sda=machine.Pin(SDA_PIN), 
-                                   scl=machine.Pin(SCL_PIN), freq=400000)
-            devices = self.i2c.scan()
-            print(f"I2C devices: {[hex(d) for d in devices]}")
-        except Exception as e:
-            print(f"I2C error: {e}")
-            self.i2c = None
-        
-        # Initialize OLED
-        self.oled = None
-        self.oled_ok = False
-        
-        if self.i2c and OLED_ADDR in self.i2c.scan():
-            try:
-                from ssd1306 import SSD1306
-                self.oled = SSD1306(OLED_WIDTH, OLED_HEIGHT, self.i2c, OLED_ADDR)
-                self.oled.contrast(255)
-                self.oled_ok = True
-                print("✓ OLED initialized and working!")
-            except Exception as e:
-                print(f"OLED init failed: {e}")
-                self.oled = None
-                self.oled_ok = False
-        else:
-            print("✗ OLED not found")
-        
-        # Initialize ADC
-        try:
-            self.adc_ph = machine.ADC(machine.Pin(ADC_PH_PIN))
-            self.adc_tds = machine.ADC(machine.Pin(ADC_TDS_PIN))
-            self.adc_turbidity = machine.ADC(machine.Pin(ADC_TURBIDITY_PIN))
-            print(f"✓ ADC initialized")
-        except Exception as e:
-            print(f"ADC init failed: {e}")
-            raise
-        
-        # Initialize DS18B20
-        self.ds_pin = machine.Pin(DS18B20_PIN)
-        self.ds_sensor = None
-        self.ds_ok = False
-        
-        try:
-            self.ds_sensor = ds18x20.DS18X20(onewire.OneWire(self.ds_pin))
-            self.roms = self.ds_sensor.scan()
-            if self.roms:
-                self.ds_ok = True
-                print(f"✓ DS18B20 found")
-            else:
-                print("✗ DS18B20 not found")
-        except Exception as e:
-            print(f"DS18B20 error: {e}")
-        
-        # pH Filter buffers
-        self.median_buffer = []
-        self.moving_buffer = []
-        self.ema_value = None
-        self.ph_history = []
-        self.voltage_history = []
-        
-        # TDS buffers
-        self.tds_median_buffer = []
-        self.tds_average_buffer = []
-        
-        # Sensor values
-        self.ph_value = 0.0
-        self.ph_voltage = 0.0
-        self.tds_value = 0.0
-        self.tds_voltage = 0.0
-        self.temperature = 0.0
-        self.turbidity = 0.0
-        self.turbidity_raw = 0
-        
-        # Display values (smoothed)
-        self.display_ph = 7.0
-        self.display_tds = 0.0
-        self.display_temp = 0.0
-        self.display_turb = 0.0
-        
-        # Classification result
-        self.classification = None
-        
-        # Test sensors
-        self.test_sensors()
-        
-        # Show splash screen
-        self.show_splash()
-    
-    def show_splash(self):
-        if not self.oled_ok or not self.oled:
-            return
-        
-        try:
-            self.oled.fill(0)
-            self.oled.text("pH MONITOR", 20, 20, 1)
-            self.oled.text("Loading...", 30, 40, 1)
-            self.oled.show()
-            time.sleep(1)
-            
-        except Exception as e:
-            print(f"Splash error: {e}")
-    
-    def test_sensors(self):
-        try:
-            raw = self.adc_ph.read_u16()
-            voltage = (raw / ADC_MAX) * ADC_REF
-            print(f"pH Test - Raw: {raw}, Voltage: {voltage:.3f}V")
-            
-            raw = self.adc_tds.read_u16()
-            voltage = (raw / ADC_MAX) * ADC_REF
-            print(f"TDS Test - Raw: {raw}, Voltage: {voltage:.3f}V")
-            
-            raw = self.adc_turbidity.read_u16()
-            value = raw >> 4
-            print(f"Turbidity Test - Raw: {value}")
-            
-            if self.ds_ok:
-                self.ds_sensor.convert_temp()
-                time.sleep(0.75)
-                temp = self.ds_sensor.read_temp(self.roms[0])
-                print(f"Temperature Test: {temp:.2f}C")
-            
-        except Exception as e:
-            print(f"Sensor test error: {e}")
-    
-    # ============ PH FUNCTIONS ============
-    def median_filter_ph(self, value):
-        try:
-            self.median_buffer.append(value)
-            if len(self.median_buffer) > MEDIAN_FILTER_SIZE:
-                self.median_buffer.pop(0)
-            
-            if len(self.median_buffer) < MEDIAN_FILTER_SIZE:
-                return value
-            
-            sorted_buffer = sorted(self.median_buffer)
-            return sorted_buffer[MEDIAN_FILTER_SIZE // 2]
-        except:
-            return value
-    
-    def moving_average_ph(self, value):
-        try:
-            self.moving_buffer.append(value)
-            if len(self.moving_buffer) > MOVING_AVERAGE_SIZE:
-                self.moving_buffer.pop(0)
-            return sum(self.moving_buffer) / len(self.moving_buffer)
-        except:
-            return value
-    
-    def ema_filter(self, value):
-        try:
-            if self.ema_value is None:
-                self.ema_value = value
-            else:
-                self.ema_value = EMA_ALPHA * value + (1 - EMA_ALPHA) * self.ema_value
-            return self.ema_value
-        except:
-            return value
-    
-    def calculate_pH(self, voltage):
-        try:
-            if voltage <= CAL_POINTS[0][0]:
-                v1, ph1 = CAL_POINTS[0]
-                v2, ph2 = CAL_POINTS[1]
-                slope = (ph2 - ph1) / (v2 - v1) if (v2 - v1) != 0 else 0
-                return ph1 + slope * (voltage - v1)
-            
-            if voltage >= CAL_POINTS[-1][0]:
-                v1, ph1 = CAL_POINTS[-2]
-                v2, ph2 = CAL_POINTS[-1]
-                slope = (ph2 - ph1) / (v2 - v1) if (v2 - v1) != 0 else 0
-                return ph1 + slope * (voltage - v1)
-            
-            for i in range(len(CAL_POINTS) - 1):
-                v1, ph1 = CAL_POINTS[i]
-                v2, ph2 = CAL_POINTS[i + 1]
-                if v1 <= voltage <= v2:
-                    if v2 - v1 == 0:
-                        return ph1
-                    t = (voltage - v1) / (v2 - v1)
-                    return ph1 + t * (ph2 - ph1)
-            
-            return CAL_POINTS[1][1]
-        except:
-            return 7.0
-    
-    def read_ph(self):
-        try:
-            raw = self.adc_ph.read_u16()
-            voltage = (raw / ADC_MAX) * ADC_REF
-            self.ph_voltage = voltage
-            
-            filtered_voltage = self.median_filter_ph(voltage)
-            raw_ph = self.calculate_pH(filtered_voltage)
-            avg_ph = self.moving_average_ph(raw_ph)
-            filtered_ph = self.ema_filter(avg_ph)
-            
-            self.ph_history.append(filtered_ph)
-            self.voltage_history.append(voltage)
-            
-            if len(self.ph_history) > MOVING_AVERAGE_SIZE:
-                self.ph_history.pop(0)
-                self.voltage_history.pop(0)
-            
-            self.ph_value = filtered_ph
-            return filtered_ph
-        except Exception as e:
-            print(f"pH read error: {e}")
-            return self.ph_value
-    
-    # ============ TDS FUNCTIONS ============
-    def median_filter_tds(self, value):
-        try:
-            self.tds_median_buffer.append(value)
-            if len(self.tds_median_buffer) > 5:
-                self.tds_median_buffer.pop(0)
-            
-            if len(self.tds_median_buffer) < 5:
-                return value
-            
-            sorted_buffer = sorted(self.tds_median_buffer)
-            return sorted_buffer[2]
-        except:
-            return value
-    
-    def read_tds(self, temperature):
-        try:
-            samples = []
-            for _ in range(50):
-                samples.append(self.adc_tds.read_u16())
-                time.sleep_ms(2)
-            
-            raw_avg = sum(samples) / len(samples)
-            voltage = raw_avg * ADC_REF / ADC_MAX
-            self.tds_voltage = voltage
-            
-            filtered_voltage = self.median_filter_tds(voltage)
-            
-            temp_factor = 1.0 + TDS_TEMP_COEFF * (temperature - 25.0)
-            compensated_voltage = filtered_voltage / temp_factor
-            
-            tds = (compensated_voltage * 1000.0) / TDS_CAL_FACTOR
-            
-            if tds < 0:
-                tds = 0
-            elif tds > 5000:
-                tds = 5000
-            
-            self.tds_average_buffer.append(tds)
-            if len(self.tds_average_buffer) > 10:
-                self.tds_average_buffer.pop(0)
-            
-            if len(self.tds_average_buffer) > 0:
-                tds = sum(self.tds_average_buffer) / len(self.tds_average_buffer)
-            
-            self.tds_value = tds
-            return tds
-            
-        except Exception as e:
-            print(f"TDS read error: {e}")
-            return self.tds_value
-    
-    # ============ TEMPERATURE FUNCTIONS ============
-    def read_temperature(self):
-        try:
-            if not self.ds_ok:
-                return 25.0
-            
-            self.ds_sensor.convert_temp()
-            time.sleep(0.75)
-            temp = self.ds_sensor.read_temp(self.roms[0])
-            self.temperature = temp
-            return temp
-        except Exception as e:
-            print(f"Temperature read error: {e}")
-            return self.temperature
-    
-    # ============ TURBIDITY FUNCTIONS ============
-    def read_turbidity(self):
-        try:
-            raw_16bit = self.adc_turbidity.read_u16()
-            nilai = raw_16bit >> 4
-            self.turbidity_raw = nilai
-            
-            if nilai >= TURB_JERNIH:
-                ntu = 0.0
-            elif nilai <= TURB_KERUH:
-                ntu = 100.0
-            else:
-                ntu = (TURB_JERNIH - nilai) * 100.0 / TURB_RANGE
-            
-            if ntu < 0:
-                ntu = 0
-            elif ntu > 100:
-                ntu = 100
-            
-            self.turbidity = ntu
-            return ntu
-        except Exception as e:
-            print(f"Turbidity read error: {e}")
-            return self.turbidity
-    
-    # ============ CLASSIFICATION ============
-    def classify_water(self):
-        return WaterClassifier.classify(
-            self.ph_value,
-            self.tds_value,
-            self.turbidity,
-            self.temperature
-        )
-    
-    # ============ SIMPLE OLED DISPLAY ============
-    def draw_oled(self):
-        if not self.oled_ok or not self.oled:
-            return
-        
-        try:
-            # Smooth display values
-            self.display_ph = (0.7 * self.display_ph) + (0.3 * self.ph_value)
-            self.display_tds = (0.7 * self.display_tds) + (0.3 * self.tds_value)
-            self.display_temp = (0.7 * self.display_temp) + (0.3 * self.temperature)
-            self.display_turb = (0.7 * self.display_turb) + (0.3 * self.turbidity)
-            
-            # Classify
-            score, status, kategori = self.classify_water()
-            
-            # Clear screen
-            self.oled.fill(0)
-            
-            # === LINE 1: pH | ppm ===
-            # pH
-            ph_str = f"pH {self.display_ph:.2f}"
-            self.oled.text(ph_str, 2, 5, 1)
-            
-            # Separator
-            self.oled.text("|", 72, 5, 1)
-            
-            # TDS (ppm)
-            tds_str = f"ppm {self.display_tds:.0f}"
-            self.oled.text(tds_str, 80, 5, 1)
-            
-            # === LINE 2: STATUS (LAYAK / TIDAK LAYAK) ===
-            # Status text centered
-            if status == "LAYAK":
-                status_x = (128 - len(status) * 8) // 2
-                self.oled.text(status, status_x, 25, 1)
-                # Draw underline
-                self.oled.hline(status_x, 35, len(status) * 8, 1)
-            else:
-                status_x = (128 - len(status) * 8) // 2
-                self.oled.text(status, status_x, 25, 1)
-                # Draw underline
-                self.oled.hline(status_x, 35, len(status) * 8, 1)
-            
-            # === LINE 3: Score | Temperature ===
-            # Score
-            score_str = f"{score:.0f}%"
-            self.oled.text(score_str, 2, 45, 1)
-            
-            # Separator
-            self.oled.text("|", 72, 45, 1)
-            
-            # Temperature
-            temp_str = f"{self.display_temp:.1f}C"
-            self.oled.text(temp_str, 80, 45, 1)
-            
-            # Bottom line (thin)
-            self.oled.hline(0, 55, 128, 1)
-            
-            # Small indicator dot for status
-            if status == "LAYAK":
-                # Green indicator (filled circle)
-                self.oled.fill_rect(120, 57, 6, 6, 1)
-            else:
-                # Red indicator (empty circle with X)
-                self.oled.rect(120, 57, 6, 6, 1)
-                self.oled.line(121, 58, 125, 62, 1)
-                self.oled.line(125, 58, 121, 62, 1)
-            
-            # Update display
-            self.oled.show()
-            
-        except Exception as e:
-            print(f"OLED draw error: {e}")
-    
-    def print_serial(self):
-        """Print data ke serial"""
-        score, status, kategori = self.classify_water()
-        print(f"pH: {self.ph_value:.2f} | TDS: {self.tds_value:.0f}ppm | "
-              f"Temp: {self.temperature:.1f}C | Turb: {self.turbidity:.1f}NTU | "
-              f"Status: {status} ({score:.0f}%)")
-    
-    def run(self):
-        print("\n" + "="*50)
-        print("WATER QUALITY MONITOR")
-        print("="*50)
-        print(f"OLED: {'✓ Working' if self.oled_ok else '✗ Not available'}")
-        print(f"DS18B20: {'✓ Found' if self.ds_ok else '✗ Not found'}")
-        print("="*50)
-        print("Monitoring... Press Ctrl+C to stop\n")
-        
-        last_sample = time.ticks_ms()
-        last_oled = time.ticks_ms()
-        last_serial = time.ticks_ms()
-        
-        try:
-            while True:
-                now = time.ticks_ms()
-                
-                # Sampling
-                if time.ticks_diff(now, last_sample) >= SAMPLING_INTERVAL_MS:
-                    temp = self.read_temperature()
-                    self.read_ph()
-                    self.read_tds(temp)
-                    self.read_turbidity()
-                    last_sample = now
-                
-                # Serial print
-                if time.ticks_diff(now, last_serial) >= SERIAL_INTERVAL_MS:
-                    self.print_serial()
-                    last_serial = now
-                
-                # OLED update
-                if time.ticks_diff(now, last_oled) >= OLED_UPDATE_INTERVAL_MS:
-                    self.draw_oled()
-                    last_oled = now
-                
-                time.sleep_ms(10)
-                
-        except KeyboardInterrupt:
-            print("\n\nStopped by user")
-            if self.oled_ok and self.oled:
-                try:
-                    self.oled.fill(0)
-                    self.oled.text("STOPPED", 30, 25, 1)
-                    self.oled.text("Press RESET", 20, 40, 1)
-                    self.oled.show()
-                except:
-                    pass
-            raise
+# ============================================================
+# 🤖 LOGISTIC REGRESSION
+# ============================================================
 
-# Main
-if __name__ == "__main__":
-    try:
-        monitor = WaterQualityMonitor()
-        monitor.run()
-    except KeyboardInterrupt:
-        print("\nProgram stopped by user")
-    except Exception as e:
-        print(f"\nError: {e}")
-        sys.print_exception(e)
+PH_CENTER = 7.15
+SCALER_MEAN = [7.511250, 3.573763, 270.678571]
+SCALER_SCALE = [1.855603, 6.555135, 503.141208]
+COEF = [2.158634, -0.495534, -1.689377]
+INTERCEPT = -0.153053
+
+def sigmoid(x):
+    if x < -30:
+        return 0.0
+    if x > 30:
+        return 1.0
+    return 1.0 / (1.0 + math.exp(-x))
+
+def predict_ph_tds_layak(ph, tds):
+    feat = [ph, (ph - PH_CENTER) ** 2, tds]
+    z = [(feat[i] - SCALER_MEAN[i]) / SCALER_SCALE[i] for i in range(3)]
+    logit = INTERCEPT
+    for i in range(3):
+        logit += COEF[i] * z[i]
+    prob = sigmoid(logit)
+    return prob >= 0.5, prob
+
+# ============================================================
+# 📊 EVALUASI
+# ============================================================
+
+TDS_HARD_MAX = 500.0
+NTU_MAX = 5.0
+
+def evaluasi_air(ph, tds, ntu):
+    alasan = []
+    
+    if tds > TDS_HARD_MAX:
+        alasan.append("TDS tinggi")
+    if ntu > NTU_MAX:
+        alasan.append("Keruh")
+    
+    model_layak, prob = predict_ph_tds_layak(ph, tds)
+    if not model_layak:
+        alasan.append("pH/TDS tidak sehat")
+    
+    is_layak = (len(alasan) == 0)
+    
+    skor = prob * 100
+    if tds > TDS_HARD_MAX:
+        skor = min(skor, 20)
+    if ntu > NTU_MAX:
+        skor = min(skor, 30)
+    
+    return is_layak, skor, alasan
+
+# ============================================================
+# 🎬 TAMPILAN
+# ============================================================
+
+def splash_screen():
+    oled.fill(0)
+    oled.text("WATER MONITOR", 15, 20, 1)
+    oled.text("v1.0", 55, 40, 1)
+    oled.show()
+    time.sleep(0.8)
+
+def tampil_stabilisasi(detik):
+    oled.fill(0)
+    oled.text("Membaca...", 25, 20, 1)
+    oled.text(f"{detik}s", 55, 40, 1)
+    oled.show()
+
+def tampil_hasil(ph, tds, layak, skor, temp):
+    oled.fill(0)
+    
+    # === BARIS 1: pH | ppm ===
+    oled.text(f"pH:{ph:.2f}", 0, 2, 1)          # kiri
+    oled.text("|", 62, 2, 1)                    # garis pemisah
+    oled.text(f"ppm:{tds:.0f}", 70, 2, 1)       # kanan
+    
+    # === BARIS 2 + 3: STATUS (tengah, 2 baris) ===
+    status = "LAYAK" if layak else "TIDAK LAYAK"
+    x = (128 - len(status) * 8) // 2
+    oled.text(status, x, 20, 1)                 # baris 2
+    
+    # === BARIS 3: KOSONG (spasi) ===
+    # (biar status lebih lega)
+    
+    # === BARIS 4: GARIS BAWAH STATUS ===
+    oled.hline(0, 40, 128, 1)
+    
+    # === BARIS 5: Skor (kiri) | Suhu (kanan) - TANPA garis ===
+    oled.text(f"{skor:.0f}%", 0, 52, 1)          # kiri
+    oled.text(f"{temp:.1f}C", 85, 52, 1)         # kanan
+    
+    oled.show()
+
+# ============================================================
+# 🕐 STABILISASI 60 DETIK
+# ============================================================
+
+def proses_stabilisasi():
+    ph_filtered = 7.0
+    EMA_ALPHA = 0.15
+    tds_peak_voltage = 0.0
+    turb_samples = []
+    
+    print("\n⏳ Stabilisasi 60 detik...")
+    
+    for i in range(60):
+        # pH
+        ph_raw_adc = adc_ph.read_u16()
+        ph_volt = ph_raw_adc / 65535 * 3.3
+        ph_instant = get_ph(ph_volt)
+        ph_filtered = (1 - EMA_ALPHA) * ph_filtered + EMA_ALPHA * ph_instant
+        ph_filtered = max(0, min(14, ph_filtered))
         
-        try:
-            if 'monitor' in locals() and monitor.oled_ok:
-                monitor.oled.fill(0)
-                monitor.oled.text("ERROR!", 35, 25, 1)
-                error_str = str(e)[:14]
-                monitor.oled.text(error_str, 20, 40, 1)
-                monitor.oled.show()
-        except:
-            pass
+        # TDS - Peak Hold
+        tds_raw_adc = adc_tds.read_u16()
+        tds_volt = tds_raw_adc / 65535 * 3.3
+        if tds_volt > tds_peak_voltage:
+            tds_peak_voltage = tds_volt
+        
+        # Turbidity
+        turb_raw = adc_turb.read_u16() >> 4
+        turb_samples.append(turb_raw)
+        
+        led.toggle()
+        
+        # Tampilkan setiap 5 detik
+        if i % 5 == 0:
+            sisa = 60 - i
+            tampil_stabilisasi(sisa)
+            print(f"  t-{sisa}s | pH={ph_filtered:.2f}")
+        
+        time.sleep(0.3)
+    
+    led.off()
+    
+    # Hasil akhir
+    turb_avg_adc = sum(turb_samples) / len(turb_samples)
+    ntu = adc_to_ntu(turb_avg_adc)
+    tds_final = voltage_to_tds(tds_peak_voltage)
+    
+    print(f"\n✅ Selesai! pH={ph_filtered:.2f} TDS={tds_final:.0f} NTU={ntu:.1f}")
+    
+    return ph_filtered, tds_final, ntu
+
+# ============================================================
+# PROGRAM UTAMA
+# ============================================================
+
+print("=" * 40)
+print("🌊 WATER QUALITY MONITOR")
+print("Single Read Mode")
+print("=" * 40)
+
+splash_screen()
+
+temperature = 25.0
+
+try:
+    ph, tds, ntu = proses_stabilisasi()
+    
+    layak, skor, alasan = evaluasi_air(ph, tds, ntu)
+    
+    persen_jernih = ntu_to_persen_jernih(ntu)
+    skor_akhir = (skor + persen_jernih) / 2
+    
+    print("-" * 40)
+    print("📊 HASIL:")
+    print(f"pH: {ph:.2f}  |  TDS: {tds:.0f} ppm")
+    print(f"NTU: {ntu:.1f}  |  Jernih: {persen_jernih:.0f}%")
+    print(f"Status: {'LAYAK ✅' if layak else 'TIDAK LAYAK ❌'}")
+    if alasan:
+        print(f"Alasan: {', '.join(alasan)}")
+    print("-" * 40)
+    
+    # TAMPILAN HASIL
+    tampil_hasil(ph, tds, layak, skor_akhir, temperature)
+    
+    print("\n✅ Selesai! Hasil ditampilkan di OLED.")
+    print("Tekan RESET untuk baca ulang.\n")
+    
+    # LED mati
+    led.off()
+    
+    # Loop forever - hanya menampilkan hasil di OLED
+    while True:
+        time.sleep(1)
+        
+except KeyboardInterrupt:
+    print("\n🔴 Berhenti")
+except Exception as e:
+    print(f"❌ Error: {e}")
+    oled.fill(0)
+    oled.text("ERROR!", 40, 25, 1)
+    oled.text(str(e)[:14], 25, 40, 1)
+    oled.show()
