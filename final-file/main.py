@@ -1,202 +1,227 @@
 """
-Water Quality Monitor - Simple Version
-Raspberry Pi Pico 2 (RP2350)
-pH: 3-Titik Kalibrasi | TDS: Rata-rata 3 terdekat
+Water Quality Monitor - Pico 2 FINAL
+TDS: R² = 0.9998, MAE = 23.65 ppm
+pH: Kalibrasi dari data real (100 sample average)
+pH = -14.26 × Volt + 22.02
 """
 
 import time
-import onewire
-import ds18x20
+import math
 from machine import Pin, ADC, I2C
 from ssd1306 import SSD1306
-from calibration import get_ph, get_tds
 
 # ============================================================
-# KONFIGURASI HARDWARE
+# 📊 PARAMETER TDS DARI COLAB
 # ============================================================
 
-i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
-oled = SSD1306(128, 64, i2c)
-
-adc_ph = ADC(Pin(26))
-adc_tds = ADC(Pin(27))
-adc_turb = ADC(Pin(28))
-
-# DS18B20
-ow = onewire.OneWire(Pin(16))
-ds = ds18x20.DS18X20(ow)
-roms = ds.scan()
-
-if len(roms) == 0:
-    ds_ok = False
-else:
-    ds_ok = True
-
-led = Pin(25, Pin.OUT)
+TDS_COEF = [1726.481171, -3.070768]
+TDS_INTERCEPT = 232.465278
+TDS_SCALER_MEAN = [0.562986, 29.247326]
+TDS_SCALER_SCALE = [0.147120, 0.151871]
 
 # ============================================================
-# FUNGSI BACA SENSOR
+# 📊 KALIBRASI pH - DARI DATA REAL (100 SAMPLE AVERAGE)
 # ============================================================
 
-def baca_ph():
-    adc_list = []
-    for _ in range(10):
-        adc_list.append(adc_ph.read_u16())
+# pH = -14.26 × Volt + 22.02
+PH_SLOPE = -14.26
+PH_INTERCEPT = 22.02
+
+def get_ph(volt):
+    """Hitung pH dari voltase"""
+    ph = PH_SLOPE * volt + PH_INTERCEPT
+    return max(0, min(14, ph))
+
+def baca_ph_avg(samples=100):
+    """Baca pH dengan rata-rata 100 sampel"""
+    adc_ph = ADC(Pin(26))
+    total = 0
+    for _ in range(samples):
+        total += adc_ph.read_u16()
         time.sleep_ms(5)
     
-    adc_list.sort()
-    raw = adc_list[len(adc_list) // 2]
+    raw = total / samples
     volt = raw * 3.3 / 65535
     ph = get_ph(volt)
     return ph, volt, raw
 
-def baca_tds():
-    adc_list = []
-    for _ in range(10):
-        adc_list.append(adc_tds.read_u16())
+# ============================================================
+# 🔬 FUNGSI PREDIKSI TDS
+# ============================================================
+
+def predict_tds(tds_volt, suhu):
+    z0 = (tds_volt - TDS_SCALER_MEAN[0]) / TDS_SCALER_SCALE[0]
+    z1 = (suhu - TDS_SCALER_MEAN[1]) / TDS_SCALER_SCALE[1]
+    tds = TDS_INTERCEPT + TDS_COEF[0] * z0 + TDS_COEF[1] * z1
+    return max(0, tds)
+
+def baca_tds_avg(samples=100):
+    """Baca TDS dengan rata-rata 100 sampel"""
+    adc_tds = ADC(Pin(27))
+    total = 0
+    for _ in range(samples):
+        total += adc_tds.read_u16()
         time.sleep_ms(5)
     
-    raw = sum(adc_list) // len(adc_list)
+    raw = total / samples
     volt = raw * 3.3 / 65535
-    tds = get_tds(volt)
+    tds = predict_tds(volt, 25.0)
     return tds, volt, raw
 
-def baca_turbidity():
-    raw = adc_turb.read_u16() >> 4
-    if raw >= 2048:
-        return 0.0
-    elif raw <= 80:
-        return 100.0
-    else:
-        return max(0, min(100, (2048 - raw) * 100 / (2048 - 80)))
-
-def baca_suhu():
-    if not ds_ok:
-        return 25.0
-    try:
-        ds.convert_temp()
-        time.sleep_ms(750)
-        return ds.read_temp(roms[0])
-    except:
-        return 25.0
-
 # ============================================================
-# TAMPILAN OLED
+# 🖥️ TAMPILAN OLED
 # ============================================================
 
-def tampil_hasil(ph, tds, layak, skor, temp):
+def draw_degree(x, y):
+    oled.pixel(x, y, 1)
+    oled.pixel(x+2, y, 1)
+    oled.pixel(x, y+2, 1)
+    oled.pixel(x+2, y+2, 1)
+    oled.pixel(x+1, y+1, 1)
+
+def tampil_oled(ph, tds, status, skor, suhu):
     oled.fill(0)
     
     oled.text(f"pH:{ph:.2f}", 0, 2, 1)
     oled.text("|", 62, 2, 1)
     oled.text(f"ppm:{tds:.0f}", 75, 2, 1)
     
-    status = "LAYAK" if layak else "TIDAK LAYAK"
-    x = (128 - len(status) * 8) // 2
-    oled.text(status, x, 20, 1)
+    status_text = "LAYAK" if status else "TIDAK LAYAK"
+    x = (128 - len(status_text) * 8) // 2
+    oled.text(status_text, x, 20, 1)
     
-    oled.hline(0, 40, 128, 1)
+    oled.hline(0, 36, 128, 1)
     
-    oled.text(f"{skor:.0f}%", 0, 52, 1)
-    oled.text(f"{temp:.1f}C", 85, 52, 1)
+    oled.text(f"{skor:.0f}%", 0, 50, 1)
+    
+    suhu_str = f"{suhu:.1f}"
+    suhu_x = 128 - 44
+    oled.text(suhu_str, suhu_x, 50, 1)
+    degree_x = suhu_x + (len(suhu_str) * 8)
+    draw_degree(degree_x, 48)
+    oled.text("C", degree_x + 3, 50, 1)
     
     oled.show()
 
 # ============================================================
-# EVALUASI
+# 📊 EVALUASI KELAYAKAN
 # ============================================================
 
-def evaluasi(ph, tds, ntu):
+def evaluasi_air(ph, tds):
     alasan = []
     
+    if ph < 6.5:
+        alasan.append(f"pH rendah ({ph:.2f})")
+    elif ph > 8.5:
+        alasan.append(f"pH tinggi ({ph:.2f})")
+    
     if tds > 500:
-        alasan.append(f"TDS {tds:.0f}")
-    if ntu > 5:
-        alasan.append(f"Keruh {ntu:.1f}")
-    if ph < 6.5 or ph > 9.8:
-        alasan.append(f"pH {ph:.2f}")
+        alasan.append(f"TDS tinggi ({tds:.0f} ppm)")
+    elif tds > 300:
+        alasan.append(f"TDS cukup tinggi ({tds:.0f} ppm)")
     
     layak = (len(alasan) == 0)
-    skor = max(0, 100 - (len(alasan) * 25))
     
-    return layak, skor, alasan
+    skor = 100
+    if ph < 6.5 or ph > 8.5:
+        skor -= 30
+    if tds > 500:
+        skor -= 40
+    elif tds > 300:
+        skor -= 20
+    elif tds > 200:
+        skor -= 10
+    
+    return max(0, min(100, skor)), layak, alasan
 
 # ============================================================
-# PROGRAM UTAMA
+# 🕐 STABILISASI 15 DETIK
 # ============================================================
 
-print("=" * 40)
-print("🌊 WATER QUALITY MONITOR")
-print("pH: 3-Titik Kalibrasi")
-print("TDS: Rata-rata 3 terdekat")
-print("=" * 40)
+STABIL_DURASI = 15
 
-oled.fill(0)
-oled.text("WATER MONITOR", 15, 20, 1)
-oled.text("v1.0", 55, 40, 1)
-oled.show()
-time.sleep(0.8)
-
-try:
-    print("\n⏳ Membaca sensor (20x)...")
+def proses_stabilisasi():
+    print(f"\n⏳ Stabilisasi {STABIL_DURASI} detik...")
+    print("=" * 60)
+    print("  Waktu  |   pH   |  pH Volt |  TDS  | TDS Volt")
+    print("=" * 60)
     
     ph_list = []
     tds_list = []
-    ntu_list = []
     
-    for i in range(20):
-        ph, ph_volt, ph_raw = baca_ph()
-        tds, tds_volt, tds_raw = baca_tds()
-        ntu = baca_turbidity()
+    for i in range(STABIL_DURASI):
+        ph, ph_volt, _ = baca_ph_avg(50)
+        tds, tds_volt, _ = baca_tds_avg(50)
         
         ph_list.append(ph)
         tds_list.append(tds)
-        ntu_list.append(ntu)
         
-        oled.fill(0)
-        oled.text("Membaca...", 25, 20, 1)
-        oled.text(f"{i+1}/20", 55, 40, 1)
-        oled.text(f"pH:{ph:.2f}", 5, 55, 1)
-        oled.text(f"TDS:{tds:.0f}", 75, 55, 1)
-        oled.show()
+        if i % 3 == 0:
+            sisa = STABIL_DURASI - i
+            ph_avg = sum(ph_list) / len(ph_list)
+            tds_avg = sum(tds_list) / len(tds_list)
+            print(f"  t-{sisa:2d}s | {ph_avg:6.2f} |  {ph_volt:.3f}V  | {tds_avg:5.0f} |   {tds_volt:.3f}V")
         
-        print(f"  pH={ph:.2f} ({ph_volt:.3f}V) | TDS={tds:.0f} ({tds_volt:.3f}V) | NTU={ntu:.1f}")
-        
-        time.sleep(0.5)
+        time.sleep(0.3)
     
     ph_akhir = sum(ph_list) / len(ph_list)
     tds_akhir = sum(tds_list) / len(tds_list)
-    ntu_akhir = sum(ntu_list) / len(ntu_list)
-    suhu = baca_suhu()
     
-    layak, skor, alasan = evaluasi(ph_akhir, tds_akhir, ntu_akhir)
-    
-    print("\n" + "=" * 40)
-    print("📊 HASIL:")
-    print(f"   pH : {ph_akhir:.2f}")
-    print(f"   TDS: {tds_akhir:.0f} ppm")
-    print(f"   NTU: {ntu_akhir:.1f}")
-    print(f"   Suhu: {suhu:.2f}C")
-    print(f"   Status: {'LAYAK ✅' if layak else 'TIDAK LAYAK ❌'}")
-    if alasan:
-        print(f"   Alasan: {', '.join(alasan)}")
-    print("=" * 40)
-    
-    tampil_hasil(ph_akhir, tds_akhir, layak, skor, suhu)
-    
-    print("\n✅ Selesai! Hasil di OLED.")
-    print("Tekan RESET untuk baca ulang.\n")
-    
-    led.off()
-    
-    while True:
-        time.sleep(1)
+    print("=" * 60)
+    print(f"\n✅ Selesai! pH={ph_akhir:.2f}, TDS={tds_akhir:.0f} ppm")
+    return ph_akhir, tds_akhir
+
+# ============================================================
+# 🚀 MAIN PROGRAM
+# ============================================================
+
+print("=" * 50)
+print("🌊 WATER QUALITY MONITOR")
+print(f"TDS: R² = 0.9998, MAE = 23.65 ppm")
+print("pH: Kalibrasi 100 sample average")
+print(f"   pH = {PH_SLOPE:.2f} × Volt + {PH_INTERCEPT:.2f}")
+print("=" * 50)
+
+# Inisialisasi OLED
+i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
+oled = SSD1306(128, 64, i2c)
+
+# Splash
+oled.fill(0)
+oled.text("WATER MONITOR", 10, 20, 1)
+oled.text("v2.0", 55, 40, 1)
+oled.show()
+time.sleep(0.8)
+
+suhu = 25.0
+
+while True:
+    try:
+        ph, tds = proses_stabilisasi()
         
-except KeyboardInterrupt:
-    print("\n🔴 Berhenti")
-except Exception as e:
-    print(f"❌ Error: {e}")
-    oled.fill(0)
-    oled.text("ERROR!", 40, 25, 1)
-    oled.text(str(e)[:14], 25, 40, 1)
-    oled.show()
+        skor, layak, alasan = evaluasi_air(ph, tds)
+        
+        tampil_oled(ph, tds, layak, skor, suhu)
+        
+        print("-" * 50)
+        print("📊 HASIL FINAL:")
+        print(f"   pH : {ph:.2f}")
+        print(f"   TDS: {tds:.0f} ppm")
+        print(f"   Status: {'LAYAK ✅' if layak else 'TIDAK LAYAK ❌'}")
+        print(f"   Skor: {skor:.0f}%")
+        if alasan:
+            print(f"   Alasan: {', '.join(alasan)}")
+        print("-" * 50)
+        
+        print("\n✅ Selesai! Hasil di OLED.")
+        print("Tekan RESET untuk baca ulang.\n")
+        
+        while True:
+            time.sleep(1)
+        
+    except KeyboardInterrupt:
+        print("\n🔴 Berhenti")
+        break
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        time.sleep(1)
