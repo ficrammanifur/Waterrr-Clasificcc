@@ -1,4 +1,4 @@
-<h1 align="center"> 💧 KLASIFIKASI KUALITAS AIR DENGAN MLP NEURAL NETWORK<br>
+<h1 align="center">💧 KLASIFIKASI KUALITAS AIR DENGAN MLP NEURAL NETWORK<br>
     <sub>Target Deployment di Raspberry Pi Pico 2 (Edge AI / TensorFlow Lite Micro)</sub>
 </h1>
 
@@ -199,8 +199,8 @@ Raspberry Pi Pico 2
 
 ### 1. Clone Repository
 ```bash
-git clone https://github.com/username/pico2-water-quality.git
-cd pico2-water-quality
+git clone https://github.com/ficrammanifur/Waterrr-Clasificcc.git
+cd Waterrr-Clasificcc
 ```
 
 ### 2. Upload Firmware MicroPython ke Pico 2
@@ -336,7 +336,7 @@ mpremote connect /dev/ttyACM0 run main.py
 ## 📁 Struktur File
 
 ```text
-pico2-water-quality/
+Waterrr-Clasificcc/
 ├── 📄 main.py                     # Program utama Pico 2
 ├── 📄 ssd1306.py                  # Driver OLED SSD1306
 ├── 📄 model_regression.tflite     # Model kalibrasi pH & TDS
