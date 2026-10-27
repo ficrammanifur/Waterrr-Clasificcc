@@ -1,12 +1,86 @@
 """
 Water Quality Monitor - Pico 2
-RO Parameters - FIXED
+RO Parameters - OLED di GP6(SDA), GP7(SCL)
+TDS Recalibrated: 0.800V → 169 ppm
+ALL IN ONE
 """
 
 import time
 import math
 from machine import Pin, ADC, I2C
-from ssd1306 import SSD1306
+from micropython import const
+import framebuf
+
+# ============================================================
+# 📊 DRIVER OLED
+# ============================================================
+
+SET_CONTRAST = const(0x81)
+SET_ENTIRE_ON = const(0xA4)
+SET_NORM_INV = const(0xA6)
+SET_DISP = const(0xAE)
+SET_MEM_ADDR = const(0x20)
+SET_COL_ADDR = const(0x21)
+SET_PAGE_ADDR = const(0x22)
+SET_DISP_START_LINE = const(0x40)
+SET_SEG_REMAP = const(0xA0)
+SET_MUX_RATIO = const(0xA8)
+SET_COM_OUT_DIR = const(0xC0)
+SET_DISP_OFFSET = const(0xD3)
+SET_COM_PIN_CFG = const(0xDA)
+SET_DISP_CLK_DIV = const(0xD5)
+SET_PRECHARGE = const(0xD9)
+SET_VCOM_DESEL = const(0xDB)
+SET_CHARGE_PUMP = const(0x8D)
+
+class SSD1306(framebuf.FrameBuffer):
+    def __init__(self, width, height, i2c, addr=0x3C, external_vcc=False):
+        self.width = width
+        self.height = height
+        self.i2c = i2c
+        self.addr = addr
+        self.external_vcc = external_vcc
+        self.pages = self.height // 8
+        self.buffer = bytearray(self.pages * self.width)
+        super().__init__(self.buffer, self.width, self.height, framebuf.MONO_VLSB)
+        self.init_display()
+
+    def write_cmd(self, cmd):
+        self.i2c.writeto(self.addr, bytearray([0x80, cmd]))
+
+    def write_data(self, buf):
+        self.i2c.writeto(self.addr, bytearray([0x40]) + buf)
+
+    def init_display(self):
+        for cmd in (
+            SET_DISP | 0x00, SET_MEM_ADDR, 0x00,
+            SET_DISP_START_LINE | 0x00, SET_SEG_REMAP | 0x01,
+            SET_MUX_RATIO, self.height - 1,
+            SET_COM_OUT_DIR | 0x08, SET_DISP_OFFSET, 0x00,
+            SET_COM_PIN_CFG, 0x02 if self.width > 2 * self.height else 0x12,
+            SET_DISP_CLK_DIV, 0x80,
+            SET_PRECHARGE, 0x22 if self.external_vcc else 0xF1,
+            SET_VCOM_DESEL, 0x30, SET_CONTRAST, 0xFF,
+            SET_ENTIRE_ON, SET_NORM_INV,
+            SET_CHARGE_PUMP, 0x10 if self.external_vcc else 0x14,
+            SET_DISP | 0x01,
+        ):
+            self.write_cmd(cmd)
+        self.fill(0)
+        self.show()
+
+    def show(self):
+        x0, x1 = 0, self.width - 1
+        if self.width == 64:
+            x0 += 32
+            x1 += 32
+        self.write_cmd(SET_COL_ADDR)
+        self.write_cmd(x0)
+        self.write_cmd(x1)
+        self.write_cmd(SET_PAGE_ADDR)
+        self.write_cmd(0)
+        self.write_cmd(self.pages - 1)
+        self.write_data(self.buffer)
 
 # ============================================================
 # 📊 PARAMETER RO
@@ -18,18 +92,19 @@ TDS_MAX = 200.0
 NTU_MAX = 6.0
 TEMP_MIN = 20.0
 TEMP_MAX = 30.0
+NTU_JERNIH_MAX = 5.0
 
 # ============================================================
-# 📊 KALIBRASI pH - DARI ESP32
+# 📊 KALIBRASI pH
 # ============================================================
 
-V4 = 3.235
-PH4 = 4.01
+V4 = 3.261
+PH4 = 4.00
 
-V7 = 2.590
+V7 = 2.778
 PH7 = 6.86
 
-V9 = 2.183
+V9 = 2.387
 PH9 = 9.18
 
 def get_ph(volt):
@@ -38,27 +113,30 @@ def get_ph(volt):
     else:
         ph = PH7 + (PH9 - PH7) * (V7 - volt) / (V7 - V9)
     
-    # 🔥 FIX: Jika voltase sangat rendah (sensor tidak terhubung)
     if volt < 0.1:
-        return 7.0  # Return pH netral sebagai default
+        return 7.0
     
     return max(0, min(14, ph))
 
 # ============================================================
-# 📊 KALIBRASI TDS - DFRobot Formula
+# 📊 KALIBRASI TDS - REKALIBRASI
 # ============================================================
 
+# Data kalibrasi:
+# 0.50V → 0 ppm (offset)
+# 0.800V → 169 ppm (dari data Anda)
+# 1.00V → 400 ppm (estimasi)
+
+TDS_OFFSET_VOLT = 0.50
+TDS_SLOPE = 169 / (0.800 - 0.50)  # 169 / 0.30 = 563.33
+
 def calculate_tds(voltage, temp=25.0):
-    if voltage < 0.1:
+    """Konversi voltase ke TDS dengan kalibrasi linear"""
+    if voltage <= TDS_OFFSET_VOLT:
         return 0
+    tds = TDS_SLOPE * (voltage - TDS_OFFSET_VOLT)
     
-    tempCoeff = 1.0 + 0.02 * (temp - 25.0)
-    compVoltage = voltage / tempCoeff
-    
-    tds = (133.42 * compVoltage ** 3 -
-           255.86 * compVoltage ** 2 +
-           857.39 * compVoltage) * 0.5
-    
+    # Batasi nilai
     if tds < 0:
         tds = 0
     if tds > 9999:
@@ -69,34 +147,57 @@ def calculate_tds(voltage, temp=25.0):
 # 📊 KALIBRASI TURBIDITY
 # ============================================================
 
-ADC_AIR = 1946
-ADC_UDARA = 1705
+NILAI_JERNIH = 2030
+NILAI_KERUH = 200
+RANGE_NILAI = NILAI_JERNIH - NILAI_KERUH
 
 def adc_to_ntu(adc):
-    if adc >= ADC_AIR:
+    if adc >= NILAI_JERNIH:
         return 0.0
-    elif adc <= ADC_UDARA:
+    elif adc <= NILAI_KERUH:
         return 100.0
     else:
-        return 100.0 * (ADC_AIR - adc) / (ADC_AIR - ADC_UDARA)
+        return (NILAI_JERNIH - adc) * 100.0 / RANGE_NILAI
+
+def get_turbidity_status(ntu):
+    if ntu <= 1:
+        return "SANGAT JERNIH"
+    elif ntu <= 5:
+        return "JERNIH"
+    elif ntu <= 20:
+        return "AGAK KERUH"
+    elif ntu <= 50:
+        return "KERUH"
+    else:
+        return "SANGAT KERUH"
 
 # ============================================================
-# 🔬 INISIALISASI OLED & ADC
+# 🔬 INISIALISASI
 # ============================================================
 
-print("🔧 Inisialisasi OLED...")
+print("🔧 Inisialisasi OLED di GP6(SDA), GP7(SCL)...")
 i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
-oled = SSD1306(128, 64, i2c)
+
+devices = i2c.scan()
+print(f"  Perangkat I2C: {[hex(d) for d in devices]}")
+
+if 0x3C in devices:
+    oled = SSD1306(128, 64, i2c)
+    oled_ok = True
+    print("  ✅ OLED terdeteksi!")
+else:
+    oled = None
+    oled_ok = False
+    print("  ❌ OLED tidak terdeteksi!")
 
 print("🔧 Inisialisasi ADC...")
 adc_ph = ADC(Pin(26))
 adc_tds = ADC(Pin(27))
 adc_turb = ADC(Pin(28))
-
 print("✅ Semua siap!")
 
 # ============================================================
-# 🔬 FUNGSI BACA SENSOR - FIXED
+# 🔬 FUNGSI BACA SENSOR
 # ============================================================
 
 def baca_ph_avg(samples=30):
@@ -107,12 +208,6 @@ def baca_ph_avg(samples=30):
     raw = total / samples
     volt = raw * 3.3 / 65535
     ph = get_ph(volt)
-    
-    # 🔥 Peringatan jika sensor tidak terhubung
-    if volt < 0.1:
-        print("  ⚠️ PERINGATAN: Sensor pH tidak terhubung! (Volt=0)")
-    
-    print(f"  DEBUG pH: Raw={raw:.0f} Volt={volt:.3f}V pH={ph:.2f}")
     return ph, volt, raw
 
 def baca_tds_avg(samples=30):
@@ -123,7 +218,6 @@ def baca_tds_avg(samples=30):
     raw = total / samples
     volt = raw * 3.3 / 65535
     tds = calculate_tds(volt, 25.0)
-    print(f"  DEBUG TDS: Raw={raw:.0f} Volt={volt:.3f}V TDS={tds:.0f}")
     return tds, volt, raw
 
 def baca_turb_avg(samples=30):
@@ -132,82 +226,88 @@ def baca_turb_avg(samples=30):
         total += adc_turb.read_u16()
         time.sleep_ms(2)
     raw = total / samples
-    
-    # 🔥 FIX: Konversi float ke int dulu sebelum shift
     raw_int = int(raw)
     adc_12bit = raw_int >> 4
-    
     ntu = adc_to_ntu(adc_12bit)
     volt = raw * 3.3 / 65535
-    print(f"  DEBUG Turb: Raw={raw:.0f} ADC={adc_12bit} NTU={ntu:.1f}")
     return ntu, volt, raw
 
 # ============================================================
-# 📊 EVALUASI KELAYAKAN
+# 📊 LOGIKA LAYAK/TIDAK LAYAK
 # ============================================================
 
-def evaluasi_air(ph, tds, ntu, temp):
-    alasan = []
+def is_water_layak(ph, tds, ntu, temp):
+    return (ph >= PH_MIN and ph <= PH_MAX) and \
+           (tds <= TDS_MAX) and \
+           (ntu <= NTU_MAX) and \
+           (temp >= TEMP_MIN and temp <= TEMP_MAX)
+
+def get_unlayak_reason(ph, tds, ntu, temp):
+    reasons = []
     
-    # 🔥 Jika sensor tidak terhubung, tampilkan peringatan
-    if ph > 13.5 or ph < 0.5:
-        alasan.append("Sensor pH error")
-    
-    if ph < PH_MIN:
-        alasan.append(f"pH rendah ({ph:.2f})")
-    elif ph > PH_MAX:
-        alasan.append(f"pH tinggi ({ph:.2f})")
-    
-    if tds > TDS_MAX:
-        alasan.append(f"TDS tinggi ({tds:.0f} ppm)")
-    
-    if ntu > NTU_MAX:
-        alasan.append(f"Keruh ({ntu:.1f} NTU)")
-    
-    if temp < TEMP_MIN:
-        alasan.append(f"Suhu dingin ({temp:.1f}C)")
-    elif temp > TEMP_MAX:
-        alasan.append(f"Suhu panas ({temp:.1f}C)")
-    
-    layak = (len(alasan) == 0)
-    
-    skor = 100
     if ph < PH_MIN or ph > PH_MAX:
-        skor -= 30
-    if tds > TDS_MAX:
-        skor -= 40
-    elif tds > 100:
-        skor -= 20
-    elif tds > 50:
-        skor -= 10
-    if ntu > NTU_MAX:
-        skor -= 30
-    elif ntu > 3:
-        skor -= 15
-    if temp < TEMP_MIN or temp > TEMP_MAX:
-        skor -= 20
+        reasons.append(f"pH ({ph:.2f})")
     
-    return max(0, min(100, skor)), layak, alasan
+    if tds > TDS_MAX:
+        reasons.append(f"TDS ({tds:.0f} ppm)")
+    
+    if ntu > NTU_MAX:
+        reasons.append(f"Kekeruhan ({ntu:.1f} NTU)")
+    
+    if temp < TEMP_MIN or temp > TEMP_MAX:
+        reasons.append(f"Suhu ({temp:.1f}C)")
+    
+    if not reasons:
+        return "Semua parameter normal"
+    return ", ".join(reasons)
+
+# ============================================================
+# 📊 HITUNG SKOR = PERSENTASE KEJERNIHAN
+# ============================================================
+
+def hitung_persen_jernih(ntu):
+    if ntu <= NTU_JERNIH_MAX:
+        return 100
+    elif ntu >= NTU_MAX:
+        return 0
+    else:
+        persen = 100 - ((ntu - NTU_JERNIH_MAX) / (NTU_MAX - NTU_JERNIH_MAX) * 100)
+        return max(0, min(100, int(persen)))
 
 # ============================================================
 # 🖥️ TAMPILAN OLED
 # ============================================================
 
 def draw_degree(x, y):
+    if not oled_ok:
+        return
     oled.pixel(x, y, 1)
     oled.pixel(x+2, y, 1)
     oled.pixel(x, y+2, 1)
     oled.pixel(x+2, y+2, 1)
     oled.pixel(x+1, y+1, 1)
 
-def tampil_oled(ph, tds, status, skor, temp):
+def splash_screen():
+    if not oled_ok:
+        return
+    
+    oled.fill(0)
+    oled.text("Water Monitor", 15, 15, 1)
+    oled.text("   Quality", 20, 35, 1)
+    oled.show()
+    time.sleep(1.5)
+
+def tampil_oled(ph, tds, layak, skor, temp):
+    if not oled_ok:
+        return
+    
     oled.fill(0)
     
     oled.text(f"pH:{ph:.2f}", 0, 2, 1)
     oled.text("|", 62, 2, 1)
     oled.text(f"ppm:{tds:.0f}", 75, 2, 1)
     
-    status_text = "LAYAK" if status else "TIDAK LAYAK"
+    status_text = "BAIK" if layak else "TIDAK BAIK"
     x = (128 - len(status_text) * 8) // 2
     oled.text(status_text, x, 20, 1)
     
@@ -271,16 +371,12 @@ def proses_stabilisasi():
 # ============================================================
 
 print("=" * 50)
-print("🌊 WATER QUALITY MONITOR - RO")
+print("🌊 WATER QUALITY MONITOR")
 print(f"pH: {PH_MIN}-{PH_MAX} | TDS: 0-{TDS_MAX:.0f} | NTU: 0-{NTU_MAX:.0f}")
+print(f"TDS Calibration: {TDS_OFFSET_VOLT}V → 0 ppm, 0.800V → 169 ppm")
 print("=" * 50)
 
-# Splash
-oled.fill(0)
-oled.text("WATER MONITOR", 10, 20, 1)
-oled.text("RO System", 45, 40, 1)
-oled.show()
-time.sleep(0.5)
+splash_screen()
 
 temp = 25.0
 
@@ -288,7 +384,11 @@ while True:
     try:
         ph, tds, ntu = proses_stabilisasi()
         
-        skor, layak, alasan = evaluasi_air(ph, tds, ntu, temp)
+        layak = is_water_layak(ph, tds, ntu, temp)
+        alasan = get_unlayak_reason(ph, tds, ntu, temp)
+        turb_status = get_turbidity_status(ntu)
+        
+        skor = hitung_persen_jernih(ntu)
         
         tampil_oled(ph, tds, layak, skor, temp)
         
@@ -296,11 +396,11 @@ while True:
         print("📊 HASIL FINAL:")
         print(f"   pH : {ph:.2f}  ({PH_MIN}-{PH_MAX})")
         print(f"   TDS: {tds:.0f} ppm  (0-{TDS_MAX:.0f})")
-        print(f"   NTU: {ntu:.1f}  (0-{NTU_MAX:.0f})")
-        print(f"   Status: {'LAYAK ✅' if layak else 'TIDAK LAYAK ❌'}")
-        print(f"   Skor: {skor:.0f}%")
-        if alasan:
-            print(f"   Alasan: {', '.join(alasan)}")
+        print(f"   NTU: {ntu:.1f}  (0-{NTU_MAX:.0f}) - {turb_status}")
+        print(f"   Kejernihan: {skor:.0f}%")
+        print(f"   Status: {'BAIK ✅' if layak else 'TIDAK BAIK ❌'}")
+        if alasan and alasan != "Semua parameter normal":
+            print(f"   Alasan: {alasan}")
         print("-" * 50)
         
         print("\n✅ Selesai! Hasil di OLED.")
